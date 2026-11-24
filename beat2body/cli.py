@@ -5,6 +5,7 @@ Data preparation (README 4.2-4.7), in order:
     clean         4.4 keypoint cleaning + normalization (one tool)
     audio         4.5 audio features (shared by all tools)
     beats         recompute beats from onset features (published AIST tempo)
+    edge-features EDGE's 35 baseline music features (needs the raw videos)
     clips         4.6 + 4.7 windows and train / val / test split (one tool)
     all           audio + clean + clips for several tools
     frames        4.2 optional JPEG dump
@@ -13,6 +14,12 @@ Data on Hugging Face:
     hf download | card | upload
 Training (needs torch):
     data          check the PyTorch data loader (shapes, NaNs, audio stats, speed)
+    train         train the diffusion model or the GRU baseline (locally or on SageMaker)
+    sample        generate a dance for a dataset video's music with a trained model
+    evaluate      score a trained model on val / test music (FID, diversity, beats, foot contact)
+    probe         controlled checks: separate music / genre guidance sweep, shifted beat grid
+    report        shareable videos of a run: training progress + long dances, and a summary
+    aws           SageMaker: upload-data | submit | status | download
 Inspection:
     render        stick-figure video of real or generated keypoints
 
@@ -32,13 +39,23 @@ def _commands():
     # imported lazily so `--help` works without the optional dependencies of each step
     import beat2body.pose as pose_pkg
     from beat2body import render
-    from beat2body.prep import audio, audit, clean, clips, frames, hf, run_all
+    from beat2body.prep import audio, audit, clean, clips, contact, floor, frames, hf, run_all
     beats = SimpleNamespace(DOC=audio.BEATS_DOC, add_args=audio.add_beats_args, run=audio.run_beats)
-    commands = {"clean": clean, "audio": audio, "beats": beats, "clips": clips, "all": run_all,
-                "frames": frames, "audit": audit, "hf": hf, "render": render}
+    edge_feats = SimpleNamespace(DOC=audio.EDGE_DOC, add_args=audio.add_edge_args, run=audio.run_edge)
+    commands = {"clean": clean, "audio": audio, "beats": beats, "edge-features": edge_feats, "clips": clips,
+                "all": run_all, "frames": frames, "audit": audit, "hf": hf, "render": render, "contact": contact,
+                "floor": floor}
     try:  # training commands need torch (pip install -e ".[train]")
-        from beat2body import data
+        from beat2body import data, train
         commands["data"] = data
+        commands["train"] = train
+        commands["sample"] = SimpleNamespace(DOC=train.SAMPLE_DOC, add_args=train.add_sample_args,
+                                             run=train.run_sample)
+        from beat2body import aws, evaluate, probe, report
+        commands["aws"] = aws
+        commands["evaluate"] = evaluate
+        commands["probe"] = probe
+        commands["report"] = report
     except ImportError:
         pass
     return commands, pose_pkg

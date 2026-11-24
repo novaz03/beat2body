@@ -54,7 +54,22 @@ python -m beat2body pose openpose --preview 2
 python -m beat2body clean --tool dwpose                 # 4.4 (once per tool)
 python -m beat2body audio                               # 4.5 (shared by all tools)
 python -m beat2body clips --tool dwpose                 # 4.6 + 4.7 (once per tool)
+python -m beat2body contact                             # 4.8 heel / toe contact labels (DWPose raw output)
+python -m beat2body floor                               # 4.9 floor model per video (raw video + DWPose)
 ```
+
+4.8 and 4.9 need the raw DWPose output (`keypoints/<category>/<video_id>_dwpose.npz`, with the native foot points),
+so run them before `--delete-raw`. They are used by the foot-contact work (`reports/2026-11-20_feet/CONTACT_PLAN.md`)
+and the physics checks (`beat2body/physics.py`, `reports/2026-11-22_physics/`), not by training so far.
+
+- **4.8 Contact labels** → `features/contact/<video_id>.npz`: per foot and step, heel and toe planted / moving /
+  unknown (confidence < 0.6, far from the ankle, or not seen at both ends), from DWPose's heel and toe points with
+  the same cleaning and body units as the keypoints.
+- **4.9 Floor** → `features/floor/<video_id>.json`. The horizon comes from the studio's three identical tripods
+  (background = the 90th-percentile frame, so the dancer disappears; base y = horizon + c × tripod height). For
+  videos without a raw video or with fewer than two tripod depths, the dancer's median or the overall median is used.
+  The scale k comes from the dancer's planted heel / toe points (floor y = horizon + k × torso length).
+  `physics.video_floor()` converts both to body units.
 
 `all` runs 4.5 + 4.4 + 4.6/4.7 for several tools after the pose step:
 
@@ -199,6 +214,8 @@ tests/                     # pytest
 │       <tool>/normalization.json
 ├── audio/<category>/<video_id>.wav            # 4.5
 ├── features/audio_mel|audio_onset|beats/      # 4.5, shared by the three tools
+├── features/contact/<video_id>.npz            # 4.8 heel / toe contact labels (not in git; HF: SizheZ03/beat2body-runs)
+├── features/floor/<video_id>.json             # 4.9 floor model (not in git; HF: SizheZ03/beat2body-runs)
 ├── clips/<tool>/train|val|test/*.npz          # 4.6
 │   clips/<tool>/meta.csv, split.json          # 4.7
 └── categories.json                            # category -> index (section 6), tracked in git
@@ -218,11 +235,15 @@ original public copies with the old per-video split.
 
 `hf download` puts a dataset in place (`data --download` does the same when `meta.csv` is missing); `hf card` writes the dataset card to `2d/hf_cards/` for review; `hf upload --prune` publishes local results with the card (source, AIST terms and citation, file format, split).
 
-**Training data loader.** `beat2body.data.DanceClips` / `make_loader(tool, split, batch_size, seq_len)`
-give dicts of `keypoints (L,17,2)`, `valid (L,17)`, `audio (L,65)` (mel + onset, normalized with
-train-split statistics cached in `clips/<tool>/audio_stats.json`), `beats (L,)` 0/1 mask and `category`.
-Train items get a random crop and a left/right flip. Everything is in memory: use `num_workers=0`.
-`python -m beat2body data --tool dwpose` checks shapes, NaNs, statistics and speed.
+**Training data loader.** `beat2body.data.DanceClips` / `make_loader(tool, split, batch_size, seq_len=150)`
+give EDGE-style windows: `motion (L,38)` = [2 ankle contacts | 2 root (pelvis in the image) | 17 x 2
+pelvis-centred joints], `valid`, `root_valid`, `audio (L,37)` = EDGE's 35 baseline music features
+(`python -m beat2body edge-features`, normalized with train-split statistics) + beat phase (sin, cos),
+`beats` and `category`. Windows come from `meta.csv`; data is read from the per-video files. Train items
+get a random crop and a left/right flip. `python -m beat2body data` checks shapes, NaNs and statistics.
+
+**Model.** An EDGE replica (Tseng et al., CVPR 2023) adapted to 2D with a genre condition; see
+`NEXT_STEPS.md` (Task 3) for the side-by-side comparison and `python -m beat2body train --help`.
 
 **Rendering.** `python -m beat2body render --video-id <id> --overlay` writes a stick-figure video (beats flash the panel border, audio included); `--keypoints file.npy` adds a panel for a generated `(T, 17, 2)` sequence.
 
@@ -241,3 +262,31 @@ Pipeline outputs (frames, keypoints, audio, features, clips, cards, renders) are
 [^1]: https://147.46.181.99/bitstream/10371/228833/1/000000193021.pdf
 [^2]: https://scienmag.com/diffusion-and-graph-networks-improve-music-conditioned-dance-generation-and-style-control/
 [^3]: https://rc.signalprocessingsociety.org/conferences/icassp-2022/spsicassp22vid1626
+## 7. Energy: diagnosis and fixes
+
+The first trained models (small, 7.1M) moved at about half the real speed. Diagnostics on model A
+(AWS job `beat2body-diffusion-small-bone-1fa7ddee`, 96 windows):
+
+| Check | Result | Meaning |
+|---|---|---|
+| Speed on train music vs val music | 0.58 vs 0.51 | not a generalization / overfitting problem |
+| Guidance 1 vs 2 | 0.55 vs 0.51 | not caused by classifier-free guidance |
+| Motion power by frequency, generated / real | 0–1 Hz 1.12, 1–2 Hz 0.25, 2–4 Hz 0.17 | slow swaying is there; movement on the beat (80–135 BPM = 1.3–4.5 Hz with half-beats) is missing |
+| One-step x0 prediction from almost clean input (t = 10) | speed 0.76 | the denoiser removes fine motion even when given it |
+| MinMax space: data std / frame-to-frame step / noise std at t = 10 | 0.15 / 0.022 / 0.027 | beat-level motion is the size of the smallest diffusion noise |
+
+New metric `BeatPow` (evaluate, and `beat_power` in the training checks): power of the pelvis-centred
+joint motion at 1–4 Hz relative to real. Model A: 0.26.
+
+Fixes, as flags (defaults keep EDGE's behaviour):
+
+- `--normalizer zscore`: standardize each feature instead of MinMax (data std ×7.9 against the same
+  noise). The recon / velocity losses are rescaled per feature so that the loss equals the MinMax loss;
+  only the signal-to-noise ratio of the diffusion changes.
+- `--param v`: v-prediction; x0 = sqrt(a) x_t − sqrt(1−a) v, so at low noise the input passes through
+  and the network predicts a correction. Min-SNR (x0 form, min(SNR, γ)) is the standard Min-SNR-v.
+- `--energy-weight W`: per window and joint, (log ratio of mean speed)² + (log ratio of movement
+  amplitude)² to the real window. It does not depend on the phase of the movement, which the model can
+  not know exactly, so it penalizes damping without forcing an average.
+
+Sweep: `scripts/colab_train.py` (`reg_small`, `fix_small`, `fix_energy_small`, optional EDGE size).

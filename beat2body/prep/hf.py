@@ -13,8 +13,9 @@ The datasets have the same layout as the data root, under "2d/":
     python -m beat2body hf upload --tool dwpose --prune                    # data + card
 
 Account (namespace) of the datasets, first match wins:
-    --org NAME  >  BEAT2BODY_HF_ORG  >  the logged-in account (`hf auth login` or HF_TOKEN)  >  SAMBOOM
-SAMBOOM holds the original public datasets and is only a read-only fallback. `upload` creates
+    --org NAME  >  BEAT2BODY_HF_ORG  >  the logged-in account (`hf auth login` or HF_TOKEN)  >  SizheZ03
+SizheZ03 holds the current public datasets, so downloads work without logging in. (SAMBOOM has
+the original datasets with the old per-video split.) `upload` creates
 the dataset in your account if needed, private unless --public. Private datasets need a token
 to download as well (e.g. HF_TOKEN on the training machine).
 """
@@ -29,9 +30,10 @@ from beat2body import paths
 from beat2body.paths import SPLITS, TOOLS
 
 DOC = __doc__
-FALLBACK_ORG = "SAMBOOM"  # original public datasets (read-only fallback)
+FALLBACK_ORG = "SizheZ03"  # current public datasets (read-only fallback when not logged in)
 ORG_ENV = "BEAT2BODY_HF_ORG"
 PARTS = ("keypoints", "features", "clips")
+DOWNLOAD_PARTS = PARTS + ("meta",)   # meta: only clips/<tool>/meta.csv + split.json (what training needs)
 
 
 def repo_id(org, tool):
@@ -67,7 +69,8 @@ def add_args(p):
                         help=f"dataset namespace (default: ${ORG_ENV}, else your logged-in account, "
                              f"else {FALLBACK_ORG} for downloads)")
         if name != "card":
-            sp.add_argument("--parts", nargs="+", choices=PARTS, default=list(PARTS))
+            sp.add_argument("--parts", nargs="+", choices=DOWNLOAD_PARTS if name == "download" else PARTS,
+                            default=list(PARTS), help="for training: keypoints features meta")
         if name == "download":
             sp.add_argument("--revision", default=None, help="branch, tag or commit of the dataset")
         if name == "upload":
@@ -101,6 +104,8 @@ def patterns(tool, parts):
         p.append(f"{d}/features/**")
     if "clips" in parts:
         p.append(f"{d}/clips/{tool}/**")
+    elif "meta" in parts:
+        p += [f"{d}/clips/{tool}/meta.csv", f"{d}/clips/{tool}/split.json"]
     return p
 
 
@@ -145,7 +150,11 @@ def _split_text(info):
         return (f"**Test** holds out {n} song(s) per genre completely (all their videos), so test music is "
                 f"never seen in training; use it for the final evaluation. The other videos are split into "
                 f"**train / val by {unit}** ({int(round(100 * info.get('val_ratio', 0.15)))}% val), so train and "
-                "val share songs and dancers.")
+                "val share songs and dancers." + (
+                    " Basic dances (`sBM`) follow the advanced dances' split: a basic dance on a held-out test "
+                    "song is in test; the others are split into train / val **by routine** (a dancer's routine "
+                    "is danced to several songs; all its versions stay in one split)."
+                    if info.get("has_basic") else ""))
     return f"Split by {unit}, stratified per genre."
 
 
@@ -163,6 +172,14 @@ def make_card(tool, org):
     videos = {s: len({r["video_id"] for r in rows if r["split"] == s}) for s in SPLITS}
     songs = {s: len({r.get("music") for r in rows if r["split"] == s}) for s in SPLITS}
     model, tool_license, conf = TOOL_INFO[tool]
+    n_adv = len({r["video_id"] for r in rows if "_sFM_" in r["video_id"]})
+    n_basic = len({r["video_id"] for r in rows if "_sBM_" in r["video_id"]})
+    info["has_basic"] = n_basic > 0
+    source = (f"advanced dances (`sFM`: each dancer's own choreography, ~35 s), front camera (`c01`): "
+              f"{n_adv} videos")
+    if n_basic:
+        source += (f"; and basic dances (`sBM`: 10 genre-basic routines per dancer, each danced to 4 songs, "
+                   f"7-12 s), front camera: {n_basic} videos")
     window, stride = info.get("window", 240), info.get("stride", 60)
     cats = sorted({r["category"] for r in rows})
     table = "\n".join(f"| {s} | {clips.get(s, 0)} | {videos[s]} | {songs[s]} |" for s in SPLITS)
@@ -179,7 +196,7 @@ tags:
 - motion-generation
 - keypoints
 size_categories:
-- 1K<n<10K
+- {"10K<n<100K" if len(rows) >= 10000 else "1K<n<10K"}
 ---
 
 # AIST Dance 2D keypoints ({tool})
@@ -189,10 +206,9 @@ size_categories:
 generation (project: beat2body). **No video or audio is included**: only joint coordinates
 and audio features (log-mel, onset strength, beat positions).
 
-- Source videos: advanced choreography (`sFM`), front camera (`c01`), 10 genres x 21 videos
-  ({", ".join(cats)}), resampled to 30 fps.
+- Source videos: {source}. Genres: {", ".join(cats)}. Resampled to 30 fps.
 - Pose tool: {model}. Confidence threshold {conf}.
-- Companion datasets with the same videos, split and format: {others}.
+- Companion datasets with the same format and split: {others}{" (advanced dances only)" if n_basic else ""}.
 
 ## Files
 
@@ -205,6 +221,8 @@ and audio features (log-mel, onset strength, beat positions).
 2d/features/audio_onset/<video_id>.npy          (T,) onset strength
 2d/features/beats/<video_id>.npy                beat times in frames (float): grid at the published AIST tempo,
                                                 phase fitted to the onset envelope
+2d/features/audio_edge/<video_id>.npy           (T,35) EDGE's "baseline" music features at 30 fps: onset envelope (1),
+                                                MFCC (20), chroma CENS (12), onset peaks one-hot (1), beats one-hot (1)
 2d/clips/{tool}/meta.csv                        one row per clip: clip_path, audio_feat_path, category,
                                                 start_frame, end_frame, split, video_id, dancer, music
 2d/clips/{tool}/split.json                      split options and songs per split
@@ -217,7 +235,24 @@ Keypoints are in COCO-17 order, centred on the mid-hip and divided by the median
 over the whole dataset. Undo with `xy_px = keypoints * scale + pelvis[:, None]`. `valid` is
 False where a joint was interpolated rather than observed; use it as a loss mask.
 
-Video ids follow AIST naming: `gLH_sFM_c01_d16_mLH0_ch01` = genre `LH`, dancer `d16`, song `mLH0`.
+## How the training code uses it
+
+The beat2body model is a 2D re-implementation of EDGE (Tseng et al., CVPR 2023). It does not read
+the clip files; it reads the per-video files above and uses `meta.csv` only for the windows and the
+split. Per frame it builds:
+
+- **motion (38):** 2 ankle contacts + 2 root + 34 joints. Root = `(pelvis - image centre) / scale`
+  (the dancer's position in the 1920x1080 frame, in torso lengths). Joints = `keypoints` (pelvis-centred).
+  An ankle is in contact when its image speed, root motion included, is below 0.012 torso lengths
+  per frame (about 1.5 px; about 40% of frames).
+- **music (37):** `audio_edge` (35), normalized with train-split mean / std, + sin / cos of the
+  position within the beat from `beats` (2).
+- **windows:** 150 frames (5 s) cropped from the clips of each split.
+
+Code: `beat2body.data` in the project repository; `python -m beat2body data` checks it.
+
+Video ids follow AIST naming: `gLH_sFM_c01_d16_mLH0_ch01` = genre `LH`, situation `sFM` (advanced; `sBM` =
+basic), camera `c01`, dancer `d16`, song `mLH0`, choreography / routine `ch01`.
 
 ## Split
 
