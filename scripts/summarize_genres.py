@@ -4,9 +4,9 @@
     python scripts/summarize_genres.py --out reports/2026-11-24_genres/README.md
 
 Needs read access to SizheZ03/beat2body-runs (`hf auth login` or HF_TOKEN). Writes markdown:
-  1. genre difficulty: each model's FID divided by its genre's real reference (real training dances of the same
-     genre, same number of windows), averaged over the models; FIDs of different genres are not comparable
-     directly (50-120 windows per genre bias FID upwards by different amounts);
+  1. genre difficulty: stance drift and BoneCV relative to the genre's real values (comparable across genres), with
+     the FIDs next to the genre's real reference (real training dances of the same genre, same number of windows;
+     FIDs are not comparable across genres);
   2. one table per genre: every model next to the real reference values.
 """
 import argparse
@@ -68,24 +68,29 @@ def report(models):
              f"Models: {', '.join(models)}. Real reference = real training dances of the same genre, as many windows "
              "as the genre's test windows. Speed and BeatPow are relative to the genre's real test dances (1 = real).",
              "", "## Genre difficulty", "",
-             "Model FID ÷ the genre's real-reference FID (1 = as close as real dance), mean over the models; "
-             "higher = harder.", "",
-             "| genre | windows | FID_k ratio | FID_p ratio | " + " | ".join(f"{m} FID_k÷ref" for m in models) + " |",
-             "|---|---:|---:|---:|" + "---:|" * len(models)]
+             "Ranked by how far the models' feet and bodies are from real dance in that genre: stance drift (a planted "
+             "foot sliding) and BoneCV (body size changing), each divided by the genre's real value and averaged over "
+             "the models (1 = like real). These ratios are comparable across genres. FIDs are shown with the genre's "
+             "real reference, but FID differences between genres are not comparable: the reference ranges from about 2 "
+             "to 33 (how much the test dances differ from the training dances of the genre) and windows per genre "
+             "vary.", "",
+             "| genre | windows | stance drift ÷ real | BoneCV ÷ real | FID_k: real ref / models | "
+             "FID_p: real ref / models |",
+             "|---|---:|---:|---:|---|---|"]
     rows = []
     for g in genres:
-        rk, rp, per = [], [], []
-        for m in models.values():
-            v = m.get(g, {})
-            if v.get("real_train_FID_k"):
-                rk.append(v["FID_k"] / v["real_train_FID_k"])
-                rp.append(v["FID_p"] / v["real_train_FID_p"])
-            per.append(v["FID_k"] / v["real_train_FID_k"] if v.get("real_train_FID_k") else None)
-        n = next((m[g]["windows"] for m in models.values() if g in m), 0)
-        rows.append((statistics.mean(rk) if rk else float("nan"), g, n, rp, per))
-    for k, g, n, rp, per in sorted(rows, reverse=True):
-        lines.append(f"| {g} | {n} | {k:.2f} | {statistics.mean(rp) if rp else float('nan'):.2f} | "
-                     + " | ".join(fmt("{:.2f}", x) for x in per) + " |")
+        vs = [m[g] for m in models.values() if g in m]
+        sd = [v["stance_drift"] / v["real_stance_drift"] for v in vs if v.get("real_stance_drift")]
+        bc = [v["BoneCV"] / v["real_BoneCV"] for v in vs if v.get("real_BoneCV")]
+        fk = ", ".join(f"{v['FID_k']:.0f}" for v in vs)
+        fp = ", ".join(f"{v['FID_p']:.0f}" for v in vs)
+        rows.append((statistics.mean(sd) if sd else float("nan"), g, vs[0]["windows"],
+                     statistics.mean(bc) if bc else float("nan"),
+                     f"{fmt('{:.1f}', vs[0].get('real_train_FID_k'))} / {fk}",
+                     f"{fmt('{:.1f}', vs[0].get('real_train_FID_p'))} / {fp}"))
+    for sd, g, n, bc, fk, fp in sorted(rows, reverse=True):
+        lines.append(f"| {g} | {n} | {sd:.1f} | {bc:.2f} | {fk} | {fp} |")
+    lines += ["", f"FID columns list the models in this order: {', '.join(models)}."]
     for g in genres:
         lines += ["", f"## {g}", "", "| | " + " | ".join(h for _, _, h, _ in COLS) + " |",
                   "|---|" + "---:|" * len(COLS)]

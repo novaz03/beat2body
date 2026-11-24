@@ -108,7 +108,7 @@ Series: **4.x** = foot fix; **5.x** = manner (style) as a condition instead of s
   g). A gravity-in-flight loss is the physics-based candidate.
 - **4.4a / 4.4b:** dropping the root-acceleration loss improves pose FID (4.4 29.7 → 18.7) but doubles root jitter;
   foot weight 10 (4.4b) then lets the feet lift like real (no foot planted 36% vs 40%) with the best pose FID (15.7).
-- **6.1 (gravity):** jumps fall at g (0.0194 = real), kinetic FID at the real-data floor, swing speed real; gravity
+- **6.1 (gravity):** jumps fall at g (0.0194 = real), second-best kinetic FID, swing speed real; gravity
   also cut 4.1's stance drift (0.081 → 0.049). Weak spots: body-size variation 0.247 and proportion drift. **Base.**
 - **Stage C (6.2 / 6.3):** heel/toe-gated foot loss + contact head. At weight 50 (6.2) the feet are the most correct
   yet (stance drift 0.035, PFC 0.017, floor penetration at the real level) without freezing, but pose FID rises
@@ -126,11 +126,17 @@ python reports/2026-11-20_feet/summarize.py          # add the run to RUNS first
 
 Always check swing speed (feet must still move between contacts) and contact share, not only FID and BeatPow.
 
-**Reading the numbers (2026-11-23).**
-- *FID floor:* real **training** dance scores FID_k 16.5 / FID_p 16.5 against the test songs (row "Real (train
-  windows)"). Models near or below it (6.1, 4.4b, 6.3) cannot be ranked by FID alone; one seed per model.
-- *Energy reference:* the training dances move faster than the test songs (speed 1.38, BeatPow 1.46 relative to
-  test). A model at ~1.2 / 1.4 matches its training data; it is not over-energetic.
+**Reading the numbers (corrected 2026-11-24).** Until 2026-11-24 the "Real (train windows)" row used the first
+769 training windows, which cover only 3 genres (ballet jazz, break, house); it gave FID 16.5 / 16.5, speed 1.38,
+BeatPow 1.46. With genre-matched training windows (`feet2_raw_genre` evaluations):
+- *FID floor:* real training dance scores **FID_k 3.5 / FID_p 6.9** against the test songs. Every model is far
+  above it (FID_k 13–24), so FID still separates the models. Seed / hardware noise: 4.1 re-evaluated on another GPU
+  moved 23.5 → 23.8 (FID_k) and 25.1 → 24.1 (FID_p), i.e. about ±1.
+- *Energy reference:* real training dance has speed 0.97, BeatPow 0.80 relative to the test songs. The 6.x models
+  (speed ~1.2, BeatPow 1.3–1.4) **are over-energetic**, mostly in house, hip-hop, lock and pop (BeatPow 2–3.7× real);
+  4.4b (0.87 / 0.52) is under-energetic but closer.
+- *Per genre:* `reports/2026-11-24_genres/`. Ballet jazz is the hardest genre for the feet and body size (every
+  model's stance drift is 4–12× real there); FIDs are not comparable across genres.
 - *Style vs correctness:* how often something happens (jumps, airborne share, centre of mass outside the feet,
   drops faster than g) describes style, not errors. Correctness = per-event measures: stance drift (sliding while
   planted), jump fall rate ≈ g, proportion drift, root jitter, floor penetration depth.
